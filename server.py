@@ -124,8 +124,13 @@ async def main(host: str, port: int) -> None:
         if not stop.done():
             stop.set_result(None)
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        asyncio.get_event_loop().add_signal_handler(sig, _signal_handler)
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            asyncio.get_event_loop().add_signal_handler(sig, _signal_handler)
+    except NotImplementedError:
+        # Signal handlers are not supported on Windows (ProactorEventLoop).
+        # KeyboardInterrupt will naturally break the asyncio loop.
+        pass
 
     # TODO(security): Add TLS/WSS support for encrypted transport
     # TODO(security): Add PIN-based client authentication
