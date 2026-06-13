@@ -15,6 +15,7 @@ import logging
 import platform
 import signal
 import sys
+import time
 
 import websockets
 from websockets.asyncio.server import ServerConnection
@@ -76,6 +77,8 @@ async def handle_client(websocket: ServerConnection) -> None:
 
     audio_sink = create_audio_sink()
     frame_count = 0
+    start_time = time.time()
+    last_log_time = start_time
 
     try:
         audio_sink.open(SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH)
@@ -85,10 +88,18 @@ async def handle_client(websocket: ServerConnection) -> None:
             if isinstance(message, bytes):
                 audio_sink.write(message)
                 frame_count += 1
-                if frame_count % 500 == 0:  # Log every ~10 seconds at 20ms chunks
+                if frame_count % 500 == 0:  # 500 frames of 20ms = 10.0 seconds of audio
+                    now = time.time()
+                    elapsed = now - last_log_time
+                    last_log_time = now
+                    
+                    # Calculate delay: Expected time is 10.0s. Anything higher means network lag.
+                    # Delay rate = Real time taken / Expected audio time
+                    delay_rate = elapsed / 10.0
+                    
                     logger.info(
-                        "Streaming: %d frames received from %s",
-                        frame_count, client_addr,
+                        "Streaming: 500 frames received. Elapsed: %.2fs (Delay Rate: %.2fx)",
+                        elapsed, delay_rate
                     )
             # Ignore text messages (could be used for control in future)
 
