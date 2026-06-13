@@ -65,7 +65,6 @@ class WindowsAudioSink(AudioSink):
             rate=sample_rate,
             output=True,
             output_device_index=device_index,
-            frames_per_buffer=1024,
         )
         self._opened = True
         logger.info(

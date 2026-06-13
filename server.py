@@ -79,35 +79,58 @@ async def handle_client(websocket: ServerConnection) -> None:
     frame_count = 0
     start_time = time.time()
     last_log_time = start_time
+    
+    # Jitter buffer to prevent infinite delay accumulation.
+    # 5 frames * 20ms = 100ms max queue latency.
+    # If the network lags and suddenly sends a burst of frames,
+    # we drop the old ones to catch up to real-time.
+    jitter_buffer: asyncio.Queue[bytes] = asyncio.Queue(maxsize=5)
 
     try:
         audio_sink.open(SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH)
         logger.info("Audio sink ready. Streaming audio from %s", client_addr)
 
+        # Background task to write to PyAudio without blocking the WebSocket loop
+        async def play_audio():
+            loop = asyncio.get_running_loop()
+            while True:
+                chunk = await jitter_buffer.get()
+                # Run the blocking write in a thread pool to avoid blocking asyncio
+                await loop.run_in_executor(None, audio_sink.write, chunk)
+                jitter_buffer.task_done()
+
+        playback_task = asyncio.create_task(play_audio())
+
         async for message in websocket:
             if isinstance(message, bytes):
-                audio_sink.write(message)
+                # If the buffer is full, drop the oldest frame to catch up!
+                if jitter_buffer.full():
+                    try:
+                        jitter_buffer.get_nowait()
+                        logger.warning("Network burst detected! Dropping old audio frame to reduce latency.")
+                    except asyncio.QueueEmpty:
+                        pass
+                
+                await jitter_buffer.put(message)
+                
                 frame_count += 1
                 if frame_count % 500 == 0:  # 500 frames of 20ms = 10.0 seconds of audio
                     now = time.time()
                     elapsed = now - last_log_time
                     last_log_time = now
-                    
-                    # Calculate delay: Expected time is 10.0s. Anything higher means network lag.
-                    # Delay rate = Real time taken / Expected audio time
                     delay_rate = elapsed / 10.0
-                    
                     logger.info(
                         "Streaming: 500 frames received. Elapsed: %.2fs (Delay Rate: %.2fx)",
                         elapsed, delay_rate
                     )
-            # Ignore text messages (could be used for control in future)
 
     except websockets.exceptions.ConnectionClosed as exc:
         logger.info("Client %s disconnected: %s", client_addr, exc)
     except Exception:
         logger.exception("Error handling client %s", client_addr)
     finally:
+        if 'playback_task' in locals():
+            playback_task.cancel()
         audio_sink.close()
         async with _client_lock:
             _active_client = None
