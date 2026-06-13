@@ -16,6 +16,7 @@ import platform
 import signal
 import sys
 import time
+import functools
 
 import websockets
 from websockets.asyncio.server import ServerConnection
@@ -58,7 +59,7 @@ def create_audio_sink():
         return LinuxAudioSink()
 
 
-async def handle_client(websocket: ServerConnection) -> None:
+async def handle_client(websocket: ServerConnection, quiet: bool = False) -> None:
     """Handle a single Android client connection."""
     global _active_client
 
@@ -119,10 +120,11 @@ async def handle_client(websocket: ServerConnection) -> None:
                     elapsed = now - last_log_time
                     last_log_time = now
                     delay_rate = elapsed / 10.0
-                    logger.info(
-                        "Streaming: 500 frames received. Elapsed: %.2fs (Delay Rate: %.2fx)",
-                        elapsed, delay_rate
-                    )
+                    if not quiet:
+                        logger.info(
+                            "Streaming: 500 frames received. Elapsed: %.2fs (Delay Rate: %.2fx)",
+                            elapsed, delay_rate
+                        )
 
     except websockets.exceptions.ConnectionClosed as exc:
         logger.info("Client %s disconnected: %s", client_addr, exc)
@@ -139,7 +141,7 @@ async def handle_client(websocket: ServerConnection) -> None:
         )
 
 
-async def main(host: str, port: int) -> None:
+async def main(host: str, port: int, quiet: bool) -> None:
     """Start the DroidMic WebSocket server."""
     logger.info("=" * 50)
     logger.info("  DroidMic Server")
@@ -168,8 +170,9 @@ async def main(host: str, port: int) -> None:
 
     # TODO(security): Add TLS/WSS support for encrypted transport
     # TODO(security): Add PIN-based client authentication
+    handler = functools.partial(handle_client, quiet=quiet)
     async with websockets.serve(
-        handle_client,
+        handler,
         host,
         port,
         # Limit frame size to prevent abuse (max ~1 second of audio)
@@ -196,13 +199,17 @@ def parse_args() -> argparse.Namespace:
         "--port", "-p", type=int, default=SERVER_PORT,
         help=f"Port to listen on (default: {SERVER_PORT})",
     )
+    parser.add_argument(
+        "--quiet", "-q", action="store_true",
+        help="Suppress periodic streaming status logs",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     try:
-        asyncio.run(main(args.host, args.port))
+        asyncio.run(main(args.host, args.port, args.quiet))
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")
         sys.exit(0)
