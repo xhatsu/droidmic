@@ -1,3 +1,5 @@
 # DroidMic Server — Python Dependencies
 websockets>=13.0
 PyAudio>=0.2.14
+zeroconf>=0.132.0
+cryptography>=41.0.0

@@ -1,5 +1,12 @@
 """DroidMic server configuration and audio format constants."""
 
+# ------------------------------------------------------------------
+# TLS / Security Settings
+# ------------------------------------------------------------------
+TLS_CERT_DIR = "~/.droidmic"
+TLS_CERT_FILE = "server.crt"
+TLS_KEY_FILE = "server.key"
+
 # --- Audio Format ---
 SAMPLE_RATE = 44100        # Hz (CD quality, widely supported)
 CHANNELS = 1               # Mono (sufficient for microphone)

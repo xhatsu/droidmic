@@ -11,12 +11,13 @@ device so that any desktop application can use the phone's mic as input.
 
 import argparse
 import asyncio
+import functools
+import json
 import logging
 import platform
 import signal
 import sys
 import time
-import functools
 
 import websockets
 from websockets.asyncio.server import ServerConnection
@@ -28,6 +29,9 @@ from config import (
     SERVER_HOST,
     SERVER_PORT,
 )
+from discovery import DroidMicServiceAdvertiser
+from pairing import PairingManager
+from tls_manager import TLSManager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,12 +63,96 @@ def create_audio_sink():
         return LinuxAudioSink()
 
 
-async def handle_client(websocket: ServerConnection, quiet: bool = False) -> None:
-    """Handle a single Android client connection."""
-    global _active_client
-
+async def handle_client(websocket: ServerConnection, quiet: bool = False, pairing_manager: PairingManager = None, no_auth: bool = False, cert_fingerprint: str = "") -> None:
+    """Handle incoming WebSocket connection from an Android client."""
     client_addr = websocket.remote_address
-    logger.info("Client connected: %s", client_addr)
+    logger.info("New client connected from %s", client_addr)
+
+    # ------------------------------------------------------------------
+    # Authentication & Pairing Phase
+    # ------------------------------------------------------------------
+    if not no_auth:
+        paired = False
+        device_name = "Unknown Device"
+        device_id = "unknown"
+        
+        try:
+            # Wait for first message, which must be JSON pairing request or auth info
+            first_msg = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+            if isinstance(first_msg, str):
+                data = json.loads(first_msg)
+                msg_type = data.get("type")
+                device_name = data.get("device_name", "Unknown Device")
+                device_id = data.get("device_id", "unknown")
+                
+                if msg_type == "auth_check":
+                    # Client claims to be paired
+                    if pairing_manager.is_device_paired(device_id):
+                        logger.info("Client '%s' (%s) is already paired.", device_name, device_id)
+                        await websocket.send(json.dumps({"type": "auth_success"}))
+                        paired = True
+                    else:
+                        logger.info("Client '%s' (%s) not paired. Requesting pairing...", device_name, device_id)
+                        await websocket.send(json.dumps({"type": "auth_failed"}))
+                        # Wait for them to request pairing
+                
+                if msg_type == "pair_request" or not paired:
+                    if msg_type != "pair_request":
+                        # We might get here if auth failed and they retry, but usually they'll disconnect and reconnect
+                        # Let's wait for the pair_request
+                        msg = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                        if isinstance(msg, str):
+                            data = json.loads(msg)
+                            msg_type = data.get("type")
+                            if msg_type == "pair_request":
+                                device_name = data.get("device_name", "Unknown Device")
+                                device_id = data.get("device_id", "unknown")
+                    
+                    if msg_type == "pair_request":
+                        # Start pairing process
+                        pairing_manager.generate_pin(device_name)
+                        await websocket.send(json.dumps({"type": "pair_challenge"}))
+                        
+                        # Wait for pin response
+                        resp_msg = await asyncio.wait_for(websocket.recv(), timeout=60.0)
+                        if isinstance(resp_msg, str):
+                            resp_data = json.loads(resp_msg)
+                            if resp_data.get("type") == "pair_response":
+                                provided_pin = resp_data.get("pin", "")
+                                if pairing_manager.verify_pin(device_id, device_name, provided_pin):
+                                    await websocket.send(json.dumps({
+                                        "type": "pair_success",
+                                        "cert_fingerprint": cert_fingerprint
+                                    }))
+                                    paired = True
+                                else:
+                                    await websocket.send(json.dumps({"type": "pair_failed", "reason": "Invalid PIN"}))
+                                    await websocket.close(1008, "Invalid PIN")
+                                    return
+            else:
+                logger.warning("Expected JSON authentication message, received binary.")
+                await websocket.close(1008, "Auth required")
+                return
+                
+        except asyncio.TimeoutError:
+            logger.warning("Timeout waiting for authentication from %s", client_addr)
+            pairing_manager.cancel_pairing()
+            await websocket.close(1008, "Auth timeout")
+            return
+        except Exception as e:
+            logger.error("Error during authentication: %s", e)
+            pairing_manager.cancel_pairing()
+            await websocket.close(1011, "Auth error")
+            return
+            
+        if not paired:
+            logger.warning("Client %s failed authentication", client_addr)
+            await websocket.close(1008, "Auth failed")
+            return
+
+    # ------------------------------------------------------------------
+    # Audio Streaming Phase
+    # ------------------------------------------------------------------
 
     # Single-client mode: reject if another client is already connected
     async with _client_lock:
@@ -141,7 +229,7 @@ async def handle_client(websocket: ServerConnection, quiet: bool = False) -> Non
         )
 
 
-async def main(host: str, port: int, quiet: bool) -> None:
+async def main(host: str, port: int, quiet: bool, no_mdns: bool, no_tls: bool, no_auth: bool) -> None:
     """Start the DroidMic WebSocket server."""
     logger.info("=" * 50)
     logger.info("  DroidMic Server")
@@ -168,21 +256,54 @@ async def main(host: str, port: int, quiet: bool) -> None:
         # KeyboardInterrupt will naturally break the asyncio loop.
         pass
 
-    # TODO(security): Add TLS/WSS support for encrypted transport
-    # TODO(security): Add PIN-based client authentication
-    handler = functools.partial(handle_client, quiet=quiet)
-    async with websockets.serve(
-        handler,
-        host,
-        port,
-        # Limit frame size to prevent abuse (max ~1 second of audio)
-        max_size=SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS * 2,
-        # Ping to detect dead connections
-        ping_interval=20,
-        ping_timeout=10,
-    ):
-        logger.info("Server started successfully.")
-        await stop
+    # Initialize TLS if enabled
+    ssl_context = None
+    cert_fingerprint = ""
+    if not no_tls:
+        tls_manager = TLSManager()
+        if tls_manager.initialize():
+            ssl_context = tls_manager.get_ssl_context()
+            cert_fingerprint = tls_manager.get_fingerprint()
+            logger.info("TLS is ENABLED (wss://). Fingerprint: %s", cert_fingerprint)
+        else:
+            logger.warning("TLS initialization failed. Falling back to unencrypted (ws://).")
+    else:
+        logger.warning("TLS is DISABLED (ws://) via --no-tls flag.")
+        
+    pairing_manager = PairingManager()
+    if no_auth:
+        logger.warning("PIN pairing authentication is DISABLED via --no-auth flag.")
+
+    handler = functools.partial(
+        handle_client, 
+        quiet=quiet, 
+        pairing_manager=pairing_manager, 
+        no_auth=no_auth, 
+        cert_fingerprint=cert_fingerprint
+    )
+    
+    advertiser = None
+    if not no_mdns:
+        advertiser = DroidMicServiceAdvertiser(port=port, use_tls=ssl_context is not None, cert_fingerprint=cert_fingerprint)
+        advertiser.start()
+
+    try:
+        async with websockets.serve(
+            handler,
+            host,
+            port,
+            ssl=ssl_context,
+            # Limit frame size to prevent abuse (max ~1 second of audio)
+            max_size=SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS * 2,
+            # Ping to detect dead connections
+            ping_interval=20,
+            ping_timeout=10,
+        ):
+            logger.info("Server started successfully.")
+            await stop
+    finally:
+        if advertiser:
+            advertiser.stop()
 
     logger.info("Server shutting down...")
 
@@ -203,13 +324,25 @@ def parse_args() -> argparse.Namespace:
         "--quiet", "-q", action="store_true",
         help="Suppress periodic streaming status logs",
     )
+    parser.add_argument(
+        "--no-mdns", action="store_true",
+        help="Disable mDNS service advertisement",
+    )
+    parser.add_argument(
+        "--no-tls", action="store_true",
+        help="Disable TLS encryption (use ws:// instead of wss://)",
+    )
+    parser.add_argument(
+        "--no-auth", action="store_true",
+        help="Disable PIN pairing authentication (accept all connections)",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     try:
-        asyncio.run(main(args.host, args.port, args.quiet))
+        asyncio.run(main(args.host, args.port, args.quiet, args.no_mdns, args.no_tls, args.no_auth))
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")
         sys.exit(0)
