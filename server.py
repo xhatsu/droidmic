@@ -65,6 +65,7 @@ def create_audio_sink():
 
 async def handle_client(websocket: ServerConnection, quiet: bool = False, pairing_manager: PairingManager = None, no_auth: bool = False, cert_fingerprint: str = "") -> None:
     """Handle incoming WebSocket connection from an Android client."""
+    global _active_client
     client_addr = websocket.remote_address
     logger.info("New client connected from %s", client_addr)
 
