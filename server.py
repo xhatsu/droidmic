@@ -285,7 +285,7 @@ async def main(host: str, port: int, quiet: bool, no_mdns: bool, no_tls: bool, n
     advertiser = None
     if not no_mdns:
         advertiser = DroidMicServiceAdvertiser(port=port, use_tls=ssl_context is not None, cert_fingerprint=cert_fingerprint)
-        advertiser.start()
+        await advertiser.async_start()
 
     try:
         async with websockets.serve(
@@ -303,7 +303,7 @@ async def main(host: str, port: int, quiet: bool, no_mdns: bool, no_tls: bool, n
             await stop
     finally:
         if advertiser:
-            advertiser.stop()
+            await advertiser.async_stop()
 
     logger.info("Server shutting down...")
 

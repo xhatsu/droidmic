@@ -4,7 +4,8 @@ import logging
 import socket
 from typing import Optional
 
-from zeroconf import IPVersion, ServiceInfo, Zeroconf
+from zeroconf import IPVersion, ServiceInfo
+from zeroconf.asyncio import AsyncZeroconf
 
 logger = logging.getLogger("droidmic.discovery")
 
@@ -15,7 +16,7 @@ class DroidMicServiceAdvertiser:
         self.port = port
         self.use_tls = use_tls
         self.cert_fingerprint = cert_fingerprint
-        self.zeroconf: Optional[Zeroconf] = None
+        self.zeroconf: Optional[AsyncZeroconf] = None
         self.service_info: Optional[ServiceInfo] = None
 
     def _get_local_ip(self) -> str:
@@ -31,8 +32,8 @@ class DroidMicServiceAdvertiser:
             s.close()
         return ip
 
-    def start(self) -> None:
-        """Start advertising the service."""
+    async def async_start(self) -> None:
+        """Start advertising the service asynchronously."""
         if self.zeroconf is not None:
             return
 
@@ -57,25 +58,25 @@ class DroidMicServiceAdvertiser:
         )
 
         try:
-            self.zeroconf = Zeroconf(ip_version=IPVersion.V4Only)
-            self.zeroconf.register_service(self.service_info)
+            self.zeroconf = AsyncZeroconf(ip_version=IPVersion.V4Only)
+            await self.zeroconf.async_register_service(self.service_info)
             logger.info("mDNS: Advertising service '%s' at %s:%d", 
                         self.service_info.name, ip_addr, self.port)
         except Exception:
             logger.exception("Failed to start mDNS service advertisement")
             if self.zeroconf:
-                self.zeroconf.close()
+                await self.zeroconf.async_close()
                 self.zeroconf = None
 
-    def stop(self) -> None:
-        """Stop advertising the service."""
+    async def async_stop(self) -> None:
+        """Stop advertising the service asynchronously."""
         if self.zeroconf is not None and self.service_info is not None:
             try:
-                self.zeroconf.unregister_service(self.service_info)
-                self.zeroconf.close()
+                await self.zeroconf.async_unregister_service(self.service_info)
             except Exception:
                 pass
             finally:
+                await self.zeroconf.async_close()
                 self.zeroconf = None
                 self.service_info = None
             logger.info("mDNS: Stopped service advertisement")
