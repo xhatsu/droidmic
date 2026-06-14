@@ -17,7 +17,7 @@ CHUNK_SIZE = int(SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS * CHUNK_DURATION_MS / 100
 
 # --- Server ---
 SERVER_HOST = "0.0.0.0"    # Listen on all interfaces for LAN access
-SERVER_PORT = 8765          # WebSocket port
+SERVER_PORT = 8766          # WebSocket port
 
 # --- Virtual Mic ---
 VIRTUAL_SINK_NAME = "DroidMic"

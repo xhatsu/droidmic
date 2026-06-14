@@ -197,7 +197,8 @@ async def handle_client(websocket: ServerConnection, quiet: bool = False, pairin
                 if jitter_buffer.full():
                     try:
                         jitter_buffer.get_nowait()
-                        logger.warning("Network burst detected! Dropping old audio frame to reduce latency.")
+                        if not quiet:
+                            logger.warning("Network burst detected! Dropping old audio frame to reduce latency.")
                     except asyncio.QueueEmpty:
                         pass
                 
